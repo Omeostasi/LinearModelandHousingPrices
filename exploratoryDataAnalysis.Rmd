@@ -1,0 +1,192 @@
+---
+title: "exploratoryDataAnalysis"
+output: html_document
+---
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+library(car)
+```
+
+
+# Load data
+```{r}
+data <- read.csv("data/AmesHousing.csv", header = TRUE, sep = ";")
+```
+
+# EDA
+```{r}
+source("src/edaFunctions.R")
+```
+
+
+## Select chosen variables
+For this analysis, we are using the Ames Housing dataset to model residential property sales. We have selected a subset of variables that capture size, quality, age, and location characteristics.
+
+Target Variable
+SalePrice: The property's sale price in US dollars. This is the response variable we aim to predict.
+
+Explanatory Variables
+Size & Space
+
+GrLivArea: Above grade (ground) living area square footage.
+
+TotalBsmtSF: Total square footage of the basement area.
+
+GarageArea: Size of the garage in square feet.
+
+LotArea: Lot size in square feet.
+
+Condition & Age
+
+OverallQual: Rates the overall material and finish of the house (1 = Very Poor, 10 = Very Excellent).
+
+YearBuilt: Original construction date.
+
+YearRemodAdd: Remodel date (same as construction date if no remodeling or additions).
+
+Location & Style
+
+Neighborhood: Physical locations within Ames city limits. In the US market, this is a strong proxy for school districts, distance to the university, and neighborhood prestige, which drastically affects value independent of the house itself.
+
+HouseStyle: Describes the vertical layout of the house. Common types include:
+
+* 1-Story: "Ranch" style (all ground level).
+
+* 2-Story: Bedrooms typically upstairs.
+
+* 1.5-Story: Older homes with converted attics (slanted ceilings).
+
+* Split-Level: Staggered floors with short flights of stairs.
+
+
+store them
+```{r}
+explanatoryVars <- c("Gr.Liv.Area", "Total.Bsmt.SF", "Garage.Area", "Lot.Area", 
+                      "Overall.Qual", "Year.Built", "Year.Remod.Add", 
+                      "Neighborhood", "House.Style")
+
+targetVar <- c("SalePrice")
+
+idVars <-  c("Order","PID")
+```
+
+```{r}
+df <- data[, explanatoryVars]
+
+target <- data[targetVar]
+```
+
+## Missing values
+```{r}
+missingValues <- colSums(is.na(df))
+as.data.frame(missingValues)
+```
+
+```{r}
+missingValuesTarget <- colSums(is.na(target))
+as.data.frame(missingValuesTarget)
+```
+
+## STUDY numerical variables
+
+Explanatory variables
+```{r}
+numDescription <- numerical_descriptive(df)
+numDescription
+```
+
+Target Variables
+```{r}
+numerical_descriptive(target)
+```
+
+## Study discrete variables
+
+```{r}
+categoricalDescription <- categorical_summary(df)
+categoricalDescription
+```
+
+
+## Distributions and Histograms
+
+```{r, fig.height=20, fig.width=12}
+plots <- data_visualization(df, bins = 50)
+wrap_plots(plots, ncol = 2)
+```
+
+## Check for lienarity
+
+```{r, fig.height=20, fig.width=12}
+df <- data[c(explanatoryVars, targetVar)]
+wrap_plots(pairwiseplot_for_linearity(df, "SalePrice"), ncol = 2, nrow = 5)
+```
+
+##  Correlation Matrix
+
+```{r}
+plot_correlation_matrix(df)
+```
+
+# Model description
+
+```{r}
+model <- lm(formula = SalePrice ~ ., data = df) # this is automatically one hot encoding
+```
+
+```{r}
+summary(model)
+```
+## Confident INTERVAL OF COEFFIECIENTS
+```{r}
+as.data.frame(confint(model, level = 0.9))
+```
+
+## Confident interval with bonferroni correction
+
+```{r}
+alpha_level = 1 - (0.1/42)
+
+confInterval <- confint(model, level = alpha_level)
+as.data.frame(confint(model, level = alpha_level))
+```
+
+
+## Hypothesis testing
+Testing variables that are outside of the confidence interval
+
+
+Check whether the coefficients outside the confidence interval
+```{r}
+coeffNotSignificantList <-  c()
+for (i in 1:length(model$coefficients)){
+
+  # If Lower < 0 AND Upper > 0, the effect is not significant
+  if (confInterval[i, 1] < 0 && confInterval[i, 2] > 0) {
+    
+    coeffNotSignificantList <- c(coeffNotSignificantList, names(model$coefficients)[i])
+  }
+}
+print(coeffNotSignificantList)
+print(length(coeffNotSignificantList))
+
+```
+Test if the 26 coefficients are zero
+
+```{r}
+linearHypothesis(model, hypothesis.matrix = coeffNotSignificantList)
+```
+Since the hyphotesis is rejected, we can't put to zero all the 26 coefficients.
+It would drasticallly worsen our model.
+```{r}
+```
+
+
+```{r}
+```
+
+

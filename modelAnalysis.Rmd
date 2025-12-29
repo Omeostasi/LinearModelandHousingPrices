@@ -1,0 +1,194 @@
+---
+title: "modelAnalysis"
+output: html_document
+---
+
+# Load libraries
+```{r}
+library(tidyverse)
+library(dplyr)
+library(patchwork)
+library(car)
+library(caret)
+```
+
+# Load data
+```{r}
+data <- read.csv("data/AmesHousing.csv", header = TRUE, sep = ";")
+
+explanatoryVars <- c("Gr.Liv.Area", "Total.Bsmt.SF", "Garage.Area", "Lot.Area", 
+                      "Overall.Qual", "Year.Built", "Year.Remod.Add", 
+                      "Neighborhood", "House.Style")
+
+targetVar <- c("SalePrice")
+
+data <- data[, c(explanatoryVars, targetVar)]
+```
+
+## Managing missing values
+
+```{r}
+
+countNA <- colSums(is.na(data), na.rm = FALSE)
+as.data.frame(countNA)
+
+```
+
+```{r}
+indexMissingTotal.Bsmt.SF<- which(is.na(data$Total.Bsmt.SF))
+indexMissingGarage.Area <- which(is.na(data$Garage.Area))
+
+print(indexMissingGarage.Area)
+print(indexMissingTotal.Bsmt.SF)
+```
+```{r}
+data <- drop_na(data)
+```
+
+
+
+## Split data
+
+```{r}
+set.seed(42)
+sampleSize <- floor(0.20*nrow(data))
+
+index <- sample(seq_len(nrow(data)), size = sampleSize)
+
+temp <- data[index,]
+train <- data[-index,]
+
+# validation and test
+
+sampleSizeValidation <- floor(0.50*nrow(temp))
+indexValidation <- sample(seq_len(nrow(temp)), size=sampleSizeValidation)
+
+validation <- temp[indexValidation,]
+test <- temp[-indexValidation, ]
+
+```
+
+# Training model
+
+## Full model
+
+
+
+```{r}
+modelFull <- lm(SalePrice ~ ., data = train)
+```
+
+Plotting:
+* Residuals vs Fitted (check linearity assumption)
+* Q-Q residuals (Check normal distribution of Residuals)
+* Scale-Location (Used to check homoskedasticity)
+* Residuals vs Leverage  (Used to individuate influential outliers)
+
+```{r, resize.height= 15, resize.width=12}
+
+plot(modelFull)
+```
+
+* Linearity assumption isn't satisfied for extreme values of the target variables.
+* Residuals are normally distributed
+* Homoskedasticity assumption isn't satisfied
+* There are just three influential values at indexes: 2180, 1498, 2665
+
+
+
+
+## Check for multicollinearity
+
+starting with correlation matrix:
+```{r}
+source("src/modelAnalysisFunctions.R")
+```
+
+
+
+```{r}
+plot_correlation_matrix(train)
+```
+Some of the variables could be highly correlated:
+
+* Year.Built x Year.Remod.Add
+* Overall.Qual x Year.Built
+* Garage.Area x Overall.Qual
+* Gr.Liv.Area x Overall.Qual
+* Overall.Qual x Year.Remod.Add
+* Total.Bsmt.SF x Overall.Qual
+
+Checking with the **Variance Inflation Factors**
+```{r}
+vif_reg <- lm(SalePrice ~ Year.Built + Year.Remod.Add + Overall.Qual + Garage.Area + Gr.Liv.Area + Total.Bsmt.SF , train)
+vif(vif_reg)
+```
+There is no value between 5 to 10 therefore we can exlcude multicollinearity between those variables
+
+## One-hot encoding
+```{r}
+train$Neighborhood <- as_factor(train$Neighborhood)
+train$House.Style <- as_factor(train$House.Style)
+dummyVars(~ ., sep = ".", data = train, fullRank = TRUE)
+```
+```{r}
+train <- as_tibble(predict(dummyVars(~ ., sep = ".", data = train, fullRank = TRUE), newdata = train))
+```
+
+```{r}
+modelFull <- lm(SalePrice ~ . , train)
+```
+
+```{r}
+plot(modelFull)
+```
+```{r}
+print(train[c(1179, 1727, 2130),])
+```
+
+```{r}
+summary(modelFull)
+```
+
+## Confident interval with bonferroni correction
+
+```{r}
+alpha_level = 1 - (0.1/ncol(train))
+
+confInterval <- confint(modelFull, level = alpha_level)
+as.data.frame(confint(modelFull, level = alpha_level))
+```
+
+## Hypothesis testing
+Testing variables that are outside of the confidence interval
+
+
+Check whether the coefficients outside the confidence interval
+```{r}
+coeffNotSignificantList <-  c()
+for (i in 1:length(modelFull$coefficients)){
+
+  # If Lower < 0 AND Upper > 0, the effect is not significant
+  if (confInterval[i, 1] < 0 && confInterval[i, 2] > 0) {
+    
+    coeffNotSignificantList <- c(coeffNotSignificantList, names(modelFull$coefficients)[i])
+  }
+}
+print(coeffNotSignificantList)
+print(length(coeffNotSignificantList))
+
+```
+Test if the 26 coefficients are zero
+
+```{r}
+linearHypothesis(modelFull, hypothesis.matrix = coeffNotSignificantList)
+```
+The variables can't be eliminated because the restricted model increases RSS in a significant way
+
+**TESTING DIFFERENT HYPOTHESIS** 
+
+
+```{r}
+linearHypothesis(modelFull, "")
+```
+
