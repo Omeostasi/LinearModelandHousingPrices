@@ -163,14 +163,9 @@ pairwiseplot_for_linearity <- function(data, y_var) {
         geom_smooth(method = "lm", color = "darkred", se = FALSE) +
         labs(title = paste(y_var, "vs", x_var), x = x_var, y = y_var) +
         theme_minimal()
+      ggsave(filename = paste0("plots/linearity_", y_var, "_vs_", x_var, ".png"), plot = p, width = 8, height = 6)
       
       # Categorical x: boxplot + mean points
-    } else if (is.factor(x) || is.character(x)) {
-      p <- ggplot(data, aes(x = !!sym(x_var), y = !!sym(y_var))) +
-        geom_boxplot(fill = "steelblue", alpha = 0.6) +
-        stat_summary(fun = mean, geom = "point", color = "darkred", size = 3) +
-        labs(title = paste(y_var, "by", x_var), x = x_var, y = y_var) +
-        theme_minimal() 
     } else {
       next  # skip unsupported types
     }

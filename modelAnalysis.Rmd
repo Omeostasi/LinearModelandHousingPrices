@@ -3,6 +3,7 @@ title: "modelAnalysis"
 output: html_document
 ---
 
+
 # Load libraries
 ```{r}
 library(tidyverse)
@@ -10,6 +11,8 @@ library(dplyr)
 library(patchwork)
 library(car)
 library(caret)
+library(olsrr)
+library(glmnet)
 ```
 
 # Load data
@@ -66,9 +69,11 @@ indexValidation <- sample(seq_len(nrow(temp)), size=sampleSizeValidation)
 validation <- temp[indexValidation,]
 test <- temp[-indexValidation, ]
 
+levelsOrderNeighborhood<- levels(as_factor(data[-index,]$Neighborhood))
+levelsOrderHouseStyle<- levels(as_factor(data[-index,]$House.Style))
 ```
 
-# Training model
+# Model creation and analysis
 
 ## Full model
 
@@ -90,7 +95,7 @@ plot(modelFull)
 ```
 
 * Linearity assumption isn't satisfied for extreme values of the target variables.
-* Residuals are normally distributed
+* Residuals are not  normally distributed for extreme values
 * Homoskedasticity assumption isn't satisfied
 * There are just three influential values at indexes: 2180, 1498, 2665
 
@@ -185,10 +190,568 @@ linearHypothesis(modelFull, hypothesis.matrix = coeffNotSignificantList)
 ```
 The variables can't be eliminated because the restricted model increases RSS in a significant way
 
-**TESTING DIFFERENT HYPOTHESIS** 
+## Alternative model based on different categorization
+
+Test different range prices for the neighborhoods
+
+```{r}
+train2 <- data[-index,]
+# find the median value for each neighborhood
+neigh_summary <- train2 %>%
+  group_by(Neighborhood) %>%
+  summarise(MedianPrice = median(SalePrice, na.rm = TRUE)) %>%
+  arrange(MedianPrice)
+
+# Create a new variable based on the median price
+train2 <- train2 %>%
+  mutate(Neighborhood_Price_Range = case_when(
+    Neighborhood %in% neigh_summary$Neighborhood[1:7] ~ "Low",
+    Neighborhood %in% neigh_summary$Neighborhood[8:14] ~ "Medium",
+    Neighborhood %in% neigh_summary$Neighborhood[15:24] ~ "High",
+    TRUE ~ "Very_High"
+  ))
+```
+
+Check median prices for different house styles
+
+```{r}
+house_style_summary <- train2 %>%
+  group_by(House.Style) %>%
+  summarise(MedianPrice = median(SalePrice, na.rm = TRUE)) %>%
+  arrange(MedianPrice)
+print(house_style_summary)
+```
+
+```{r}
+train2 <- train2 %>%
+  mutate(House.Style = case_when(
+    House.Style %in% house_style_summary$House.Style[1:2] ~ "1.5",
+    House.Style %in% house_style_summary$House.Style[4] ~ "1Story",
+    House.Style %in% house_style_summary$House.Style[3] ~ "SFoyer",
+    House.Style %in% house_style_summary$House.Style[5:6] ~ "Split",
+    TRUE ~ "2Story"
+  ))
+```
+
+
+**ONE-HOT ENCODING**
+```{r}
+train2$Neighborhood_Price_Range <- as_factor(train2$Neighborhood_Price_Range)
+train2$House.Style <- as_factor(train2$House.Style)
+train2 <- select(train2, -Neighborhood)
+train2 <- as_tibble(predict(dummyVars(~ ., sep = ".", data = train2, fullRank = TRUE), newdata = train2))
+```
+
+```{r}
+modelAlt <- lm(SalePrice ~ . , train2)
+```
+
+```{r}
+alpha_level_alt = 1 - (0.1/ncol(train2))
+
+confInterval <- confint(modelAlt, level = alpha_level_alt)
+as.data.frame(confint(modelAlt, level = alpha_level_alt))
+```
+
+```{r}
+coeffNotSignificantListAlt <-  c()
+for (i in 1:length(modelAlt$coefficients)){
+  # If Lower < 0 AND Upper > 0, the effect is not significant
+  if (confInterval[i, 1] < 0 && confInterval[i, 2] > 0) {
+    
+    coeffNotSignificantListAlt <- c(coeffNotSignificantListAlt, names(modelAlt$coefficients)[i])
+  }
+}
+print(coeffNotSignificantListAlt)
+print(length(coeffNotSignificantListAlt))
+```
+**Test if nieghborhood_Price_Range.Low is zero**
+```{r}
+linearHypothesis(modelAlt, "Neighborhood_Price_Range.Low = 0")
+```
+Reject the hypothesis
+
+**Test if House.Style.Sfoyer and House.Style.Split are equal**
+
+```{r}
+linearHypothesis(modelAlt, "House.Style.SFoyer = House.Style.Split")
+```
+
+Hypothesis rejected
+
+Overall RSS of alternative model is worse than full model in the training dataset
+
+But the increase in RSS is bearable considering the reduction in the number of parameters (from 42 to 15)
+
+
+
+# Model Evaluation 
+## TYPE 1
+
+```{r ols-steps, cache=TRUE, }
+#R², adj R² and Cp for each possible model
+each_model <- ols_step_all_possible(modelAlt)
+# each_model #a lot of informations!
+```
 
 
 ```{r}
-linearHypothesis(modelFull, "")
+#plot the criteria for the number of parameters and displays the number of the best model
+plot(each_model) 
+```
+
+
+```{r best subsets, cache = TRUE}
+#R², adj R² and Cp for the best subset of variables for each number of parameters
+best_subset <- ols_step_best_subset(modelAlt)
+```
+
+
+```{r}
+# look at the best chosen models 
+best_subset
+```
+
+```{r}
+# plot the criteria for the number of parameters and displays the number of the best model
+plot(best_subset)
+```
+
+## Type 2
+
+
+```{r forward, cache = TRUE}
+forward <- ols_step_forward_adj_r2(modelAlt)
+#details = TRUE: print the regression result at each step
+#progress = TRUE: display variable selection progress
+```
+
+
+```{r}
+forward
+```
+
+
+```{r}
+plot(forward)
+```
+
+```{r backward, cache = TRUE}
+backward <- ols_step_backward_p(modelAlt)
+```
+
+
+```{r}
+backward
+```
+
+
+## Type 3
+
+### Full Model
+Using Lasso model for feature selection
+```{r}
+matrixFull <- as.matrix(train %>% select(-SalePrice))
+responseFull <- train$SalePrice
+modelLassoFull <- cv.glmnet(matrixFull, responseFull, alpha = 1, nfolds =5)
+modelLassoFull
+```
+
+
+```{r}
+
+plot(modelLassoFull)
+
+```
+
+
+```{r}
+bestLambdaFull <- modelLassoFull$lambda.min
+bestLambdaFull
+```
+
+```{r}
+lassoCoefficientsFull <- predict(modelLassoFull, s = bestLambdaFull, type = "coefficients")
+lassoCoefficientsFull
+```
+
+### Alternative Model
+Using Lasso model
+
+```{r}
+
+matrix <- as.matrix(train2 %>% select(-SalePrice))
+response <- train2$SalePrice
+modelLasso <- cv.glmnet(matrix, response, alpha = 1, nfolds =5)
+
+modelLasso
+```
+
+```{r}
+plot(modelLasso)
+```
+
+Best lambda
+```{r}
+bestLambda <- modelLasso$lambda.min
+bestLambda
+```
+
+```{r}
+lassoCoefficients <- predict(modelLasso, s = bestLambda, type = "coefficients")
+lassoCoefficients
+```
+Based on all the types of model evalutation that I used, No coefficients is equal to zero and even the features with non significant coefficients improve in a significant way the prediciton power of the model.
+Therefore I will keep all the features in the alternative model.
+
+
+# Checking for heteroskedasticity
+
+```{r}
+plot(modelAlt)
+```
+
+```{r}
+plot(modelFull)
+```
+
+
+It looks like there is a bit of heteroskedasticity in the residuals of both models, especially for high values of SalePrice.
+
+We can check which variables show this behavior
+
+```{r}
+for (var in names(train2)){
+  plot(train2[[var]], resid(modelAlt), main = paste("Residuals vs", var),
+       xlab = var, ylab = "Residuals")
+  abline(h = 0, col = "red")
+}
+```
+
+Variables that seems to show heteroskedasticity are: 
+* Gr.Liv.Area
+* Total.Bsmt.SF
+* Garage.Area
+* Lot.Area
+* Overall.Qual
+* Year.Built
+* Year.Remod.Add
+
+We can test for heteroskedasticity using the **white test**
+
+```{r}
+library(skedastic)
+```
+
+```{r}
+white(modelAlt, interactions = TRUE)
+```
+```{r}
+white(modelFull, interactions = TRUE)
+```
+
+Since there is heteroskedasticity, I will recalculate the standard errors of my coefficients to obtain robust standard errors since the actual standard errors right now are too optimistic for a heteroskedsticity case scenario
+
+```{r}
+library(sandwich)
+library(lmtest)
+
+coeftest(modelAlt, vcov = vcovHC(modelAlt, type = "HC1"))
+```
+
+```{r}
+coeftest(modelFull, vcov = vcovHC(modelFull, type = "HC1"))
+```
+
+# Autocorrelation
+
+```{r}
+bgtest(modelAlt)
+```
+
+```{r}
+bgtest(modelFull)
+```
+
+Autocorellation is present in both models
+
+```{r}
+# Update robust test to handle both Heteroscedasticity AND Autocorrelation
+robustAlt <- vcovHAC(modelAlt)
+coeftest(modelAlt, vcov = robustAlt)
+```
+No significant difference from previously calculated robust standard errors for coefficients
+
+```{r}
+# Update  robust test to handle both Heteroscedasticity AND Autocorrelation
+robustFull <- vcovHAC(modelFull)
+coeftest(modelFull, vcov = robustFull)
+```
+No significant difference from previously calculated robust standard errors for coefficients
+
+
+# Normality check
+
+The qq plot shows that residuals are not normally distributed, let's do a test to verify it
+
+```{r}
+shapiro.test(resid(modelAlt))
+```
+
+```{r}
+shapiro.test(resid(modelFull))
+```
+
+To solve this issue we can try a log transformation of the target variable
+## Log transform
+
+**modelAlt**
+```{r}
+train2$Log_SalePrice <- log(train2$SalePrice)
+modelLogAlt <- lm(Log_SalePrice ~ . - SalePrice , train2)
+```
+
+**modelFull**
+```{r}
+train$Log_SalePrice <- log(train$SalePrice)
+modelLogFull <- lm(Log_SalePrice ~ . - SalePrice , train)
+```
+
+```{r}
+plot(modelLogAlt)
+```
+
+```{r}
+plot(modelLogFull)
+```
+
+The qq plot looks better for both models, let's do again the shapiro test
+**modelAlt**
+```{r}
+shapiro.test(resid(modelLogAlt))
+```
+
+```{r}
+shapiro.test(resid(modelLogFull))
+```
+
+Probably do to outliers there are still problems with normality of residuals but the situation is improved compared to previous models without log transformation of the target variable.
+
+Let's remove the outliers
+
+**modelAlt**
+```{r}
+# Find points that have high influence (Cook's) AND high error (Studentized Residual)
+cooksAlt    <- cooks.distance(modelLogAlt)
+cook_cutoff <- 4/(nrow(train2))
+influential_indices <- which(cooksAlt > cook_cutoff & abs(rstudent(modelLogAlt)) > 2)
+
+train2_cleaned<- train2[-influential_indices, ]
+print(length(influential_indices))
+modelLogAlt_cleaned <- lm(Log_SalePrice ~ . - SalePrice , train2_cleaned)
+# Compare the Normality visually
+par(mfrow=c(1,2))
+plot(modelLogAlt, which=2, main="Original (With Outliers)")
+plot(modelLogAlt_cleaned, which=2, main="Cleaned (Outliers Removed)")
+shapiro.test(resid(modelLogAlt_cleaned))
+```
+
+**modelFull**
+```{r}
+# Find points that have high influence (Cook's) AND high error (Studentized Residual)
+cooksFull    <- cooks.distance(modelLogFull)
+influential_indices_full <- which(cooksFull > cook_cutoff & abs(rstudent(modelLogFull)) > 2)
+
+traincleaned <- train[-influential_indices_full, ]
+print(length(influential_indices_full))
+modelLogFull_cleaned <- lm(Log_SalePrice ~ . - SalePrice , traincleaned)
+# Compare the Normality visually
+par(mfrow=c(1,2))
+plot(modelLogFull, which=2, main="Original (With Outliers)")
+plot(modelLogFull_cleaned, which=2, main="Cleaned (Outliers Removed)")
+shapiro.test(resid(modelLogFull_cleaned))
+```
+
+
+# Prediction
+
+**modelAlt**
+```{r}
+validation2 <- validation %>%
+  mutate(Neighborhood_Price_Range = case_when(
+    Neighborhood %in% neigh_summary$Neighborhood[1:7] ~ "Low",
+    Neighborhood %in% neigh_summary$Neighborhood[8:14] ~ "Medium",
+    Neighborhood %in% neigh_summary$Neighborhood[15:24] ~ "High",
+    TRUE ~ "Very_High"
+  ))
+
+validation2 <- validation2 %>%
+  mutate(House.Style = case_when(
+    House.Style %in% house_style_summary$House.Style[1:2] ~ "1.5",
+    House.Style %in% house_style_summary$House.Style[4] ~ "1Story",
+    House.Style %in% house_style_summary$House.Style[3] ~ "SFoyer",
+    House.Style %in% house_style_summary$House.Style[5:6] ~ "Split",
+    TRUE ~ "2Story"
+  ))
+validation2$Neighborhood_Price_Range <- factor(validation2$Neighborhood_Price_Range, 
+                                         levels = c( "Medium", "Low", "High", "Very_High"))
+validation2$House.Style <- factor(validation2$House.Style, 
+                                 levels = c("1Story", "2Story", "1.5",  "SFoyer", "Split"))
+validation2 <- select(validation2, -Neighborhood)
+validation2 <- as_tibble(predict(dummyVars(~ ., sep = ".", data = validation2, fullRank = TRUE, ), newdata = validation2))
+validation2$Log_SalePrice <- log(validation2$SalePrice)
+```
+
+```{r}
+predictionsLogAltCleaned<- predict(modelLogAlt_cleaned, newdata = validation2)
+predictionsAlt <- exp(predictionsLogAltCleaned)
+rmseAltCleaned <- sqrt(mean((validation2$SalePrice - predictionsAlt)^2))
+rmseAltCleaned
+```
+with outliers
+```{r}
+predictionsLogAlt<- predict(modelLogAlt, newdata = validation2)
+predictionsAlt_wOutliers <- exp(predictionsLogAlt)
+rmseAlt <- sqrt(mean((validation2$SalePrice - predictionsAlt_wOutliers)^2))
+rmseAlt
+```
+
+**modelFull**
+```{r}
+validation$Log_SalePrice <- log(validation$SalePrice)
+validation$Neighborhood <- factor(validation$Neighborhood, 
+                                 levels = levelsOrderNeighborhood)
+validation$House.Style <- factor(validation$House.Style, 
+                                 levels = levelsOrderHouseStyle)
+validation_full <- as_tibble(predict(dummyVars(~ ., sep = ".", data = validation
+, fullRank = TRUE), newdata = validation))
+```
+```{r}
+predictionsLogFull<- predict(modelLogFull_cleaned, newdata = validation_full)
+predictionsFull <- exp(predictionsLogFull)
+rmseFullCleaned <- sqrt(mean((validation$SalePrice - predictionsFull)^2))
+rmseFullCleaned
+```
+with outliers
+```{r}
+predictionsLogFull_wOutliers<- predict(modelLogFull, newdata = validation_full)
+predictionsFull_wOutliers <- exp(predictionsLogFull_wOutliers)
+rmseFull <- sqrt(mean((validation$SalePrice - predictionsFull_wOutliers)^2))
+rmseFull
+```
+
+**Lasso**
+Without outliers and with all the features
+```{r}
+matrix <- as.matrix(train %>% select(-SalePrice, -Log_SalePrice))
+response <- train$Log_SalePrice
+
+
+modelLasso <- cv.glmnet(matrix, response, alpha = 1, nfolds =5)
+bestLambda <- modelLasso$lambda.min
+validation_dummies <- as_tibble(predict(dummyVars(~ ., sep = ".", data = validation, fullRank = TRUE), newdata = validation))
+validation_matrix <- as.matrix(validation_dummies %>% select(-SalePrice, -Log_SalePrice))
+predictionsLogLasso<- predict(modelLasso, s = bestLambda, newx = validation_matrix)
+predictionsLasso <- exp(predictionsLogLasso)
+rmseLasso <- sqrt(mean((validation$SalePrice - predictionsLasso)^2))
+rmseLasso
+
+```
+These rmse are quite higher than the training rmse calculated in the training dataset. 
+The reason could be due to overfitting or the presence of outliers in the validation dataset. 
+
+## removing outliers from validation
+
+```{r}
+for (name in explanatoryVars) {
+  if (is.numeric(validation2[[name]])) {
+    boxplot(validation2[[name]], main=paste("Boxplot of", name))
+    outliers <- boxplot.stats(validation2[[name]])$out
+    print(paste("Removing outliers from", name, ":", length(outliers), "outliers found"))
+    validation2 <- validation2[!validation2[[name]] %in% outliers, ]
+  }
+}
+```
+
+**modelAlt without outliers in validation set**
+```{r}
+predictionsLogAltCleaned_noOutliers<- predict(modelLogAlt_cleaned, newdata = validation2)
+predictionsAlt_noOutliers <- exp(predictionsLogAltCleaned_noOutliers)
+rmseAltCleaned_noOutliers <- sqrt(mean((validation2$SalePrice - predictionsAlt_noOutliers)^2))
+rmseAltCleaned_noOutliers
+```
+
+**modelFull without outliers in validation set**
+```{r}
+validation_full_noOutliers <- validation_full[validation_full$SalePrice %in% validation2$SalePrice, ]
+predictionsLogFull_noOutliers<- predict(modelLogFull_cleaned, newdata = validation_full_noOutliers)
+predictionsFull_noOutliers <- exp(predictionsLogFull_noOutliers)
+rmseFullCleaned_noOutliers <- sqrt(mean((validation_full_noOutliers$SalePrice - predictionsFull_noOutliers)^2))
+rmseFullCleaned_noOutliers
+```
+
+**Lasso without outliers in validation set**
+```{r}
+validation_dummies_noOutliers <- validation_dummies[validation_dummies$SalePrice %in% validation2$SalePrice, ]
+validation_matrix_noOutliers <- as.matrix(validation_dummies_noOutliers %>% select(-SalePrice, -Log_SalePrice))
+predictionsLogLasso_noOutliers<- predict(modelLasso, s = bestLambda, newx = validation_matrix_noOutliers)
+predictionsLasso_noOutliers <- exp(predictionsLogLasso_noOutliers)
+rmseLasso_noOutliers <- sqrt(mean((validation_dummies_noOutliers$SalePrice - predictionsLasso_noOutliers)^2))
+rmseLasso_noOutliers
+```
+
+
+# Test prediction of best model
+
+Best model: modelLogAlt_cleaned
+
+## removing outliers from test dataset
+
+```{r}
+for (name in explanatoryVars) {
+  if (is.numeric(test[[name]])) {
+    boxplot(test[[name]], main=paste("Boxplot of", name))
+    outliers <- boxplot.stats(test[[name]])$out
+    print(paste("Removing outliers from", name, ":", length(outliers), "outliers found"))
+    test <- test[!test[[name]] %in% outliers, ]
+  }
+}
+```
+
+
+
+```{r} 
+test2 <- test %>%
+  mutate(Neighborhood_Price_Range = case_when(
+    Neighborhood %in% neigh_summary$Neighborhood[1:7] ~ "Low",
+    Neighborhood %in% neigh_summary$Neighborhood[8:14] ~ "Medium",
+    Neighborhood %in% neigh_summary$Neighborhood[15:24] ~ "High",
+    TRUE ~ "Very_High"
+  ))
+```
+
+```{r}
+test2 <- test2 %>%
+  mutate(House.Style = case_when(
+    House.Style %in% house_style_summary$House.Style[1:2] ~ "1.5",
+    House.Style %in% house_style_summary$House.Style[4] ~ "1Story",
+    House.Style %in% house_style_summary$House.Style[3] ~ "SFoyer",
+    House.Style %in% house_style_summary$House.Style[5:6] ~ "Split",
+    TRUE ~ "2Story"
+  ))
+test2$Neighborhood_Price_Range <- factor(test2$Neighborhood_Price_Range, 
+                                        levels = c( "Medium", "Low", "High", "Very_High"))
+test2$House.Style <- factor(test2$House.Style, 
+                          levels = c("1Story", "2Story", "1.5",  "SFoyer", "Split"))
+test2 <- select(test2, -Neighborhood)
+test2 <- as_tibble(predict(dummyVars(~ ., sep = ".", data = test2, fullRank = TRUE), newdata = test2))
+test2$Log_SalePrice <- log(test2$SalePrice)
+```
+
+```{r}
+predictionsLogAltCleaned_test<- predict(modelLogAlt_cleaned, newdata = test2)
+predictionsAlt_test <- exp(predictionsLogAltCleaned_test)
+rmseAltCleaned_test <- sqrt(mean((test2$SalePrice - predictionsAlt_test)^2))
+rmseAltCleaned_test
 ```
 
